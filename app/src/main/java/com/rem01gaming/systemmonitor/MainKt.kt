@@ -105,16 +105,24 @@ object MainKt {
 
     private fun setupSystemContext() {
         try {
-            if (android.os.Looper.myLooper() == null) {
-                android.os.Looper.prepare()
+            val looperClass = Class.forName("android.os.Looper")
+            if (looperClass.getMethod("getMainLooper").invoke(null) == null) {
+                looperClass.getMethod("prepareMainLooper").invoke(null)
             }
 
             val activityThreadClass = Class.forName("android.app.ActivityThread")
+
             val thread = activityThreadClass.getMethod("systemMain").invoke(null)
+                ?: activityThreadClass.getMethod("currentActivityThread").invoke(null)
+                ?: error("Both systemMain() and currentActivityThread() returned null")
+
             systemContext =
-                activityThreadClass.getMethod("getSystemContext").invoke(thread) as Context
+                activityThreadClass.getMethod("getSystemContext").invoke(thread) as? Context
+                    ?: error("getSystemContext() returned null")
+
         } catch (e: Exception) {
-            System.err.println("Failed to set up system context: ${e.message}")
+            System.err.println("Failed to set up system context:")
+            e.printStackTrace()
         }
     }
 
