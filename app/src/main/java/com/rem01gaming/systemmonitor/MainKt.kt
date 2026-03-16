@@ -40,6 +40,7 @@ import java.nio.file.StandardOpenOption
 @SuppressLint("StaticFieldLeak", "DiscouragedPrivateApi", "PrivateApi")
 object MainKt {
     private const val POLL_INTERVAL_MS = 500L
+    private const val PID_RETRY_INTERVAL_MS = 50L
     private const val UNKNOWN_APP = "unknown 0 0"
     private const val NONE_APP = "none 0 0"
 
@@ -254,7 +255,12 @@ object MainKt {
     }
 
     private fun writeStatus() {
-        val currentStatus = buildStatus()
+        // Resolve the focused app, retrying if the PID is not yet available.
+        // Returns null if the timeout elapsed without a valid PID, in that case we
+        // skip this update so that stale "0 0" data is never written to the output file.
+        val focusedApp = waitForValidFocusedApp() ?: return
+
+        val currentStatus = buildStatus(focusedApp)
         if (currentStatus == lastStatus) return
 
         try {
@@ -272,8 +278,46 @@ object MainKt {
         }
     }
 
-    private fun buildStatus(): String {
-        val focusedApp = getFocusedAppInfo()
+    /**
+     * Returns the focused-app string once its PID is known.
+     *
+     * When the foreground app was just launched it may not yet be visible to
+     * [ActivityManager.getRunningAppProcesses], causing [getPidUid] to return "0 0".
+     * Rather than writing that bogus value immediately, we poll every [PID_RETRY_INTERVAL_MS] ms
+     * until the process shows up or [POLL_INTERVAL_MS] elapses.
+     * If the timeout expires and the PID is still unknown, the app string with "0 0" is returned
+     * so the output file is still updated rather than silently skipped.
+     * Returns null only if interrupted.
+     */
+    private fun waitForValidFocusedApp(): String? {
+        var focusedApp = getFocusedAppInfo()
+        if (!hasMissingPid(focusedApp)) return focusedApp
+
+        val deadline = System.currentTimeMillis() + POLL_INTERVAL_MS
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(PID_RETRY_INTERVAL_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return null
+            }
+            focusedApp = getFocusedAppInfo()
+            if (!hasMissingPid(focusedApp)) return focusedApp
+        }
+
+        // Timed out, write the app with 0 0 as PID/UID anyway.
+        System.err.println("DEBUG: PID still unresolved after ${POLL_INTERVAL_MS}ms for '$focusedApp'.")
+        return focusedApp
+    }
+
+    /**
+     * Returns true when [appInfo] represents a real foreground app whose PID could not
+     * yet be resolved (i.e. ends with " 0 0" but is not the sentinel [NONE_APP] value).
+     */
+    private fun hasMissingPid(appInfo: String): Boolean =
+        appInfo != NONE_APP && appInfo.endsWith(" 0 0")
+
+    private fun buildStatus(focusedApp: String): String {
         val screenAwake = if (powerManager?.isInteractive == true) 1 else 0
         val batterySaver = if (powerManager?.isPowerSaveMode == true) 1 else 0
         val zenMode = getZenMode()
